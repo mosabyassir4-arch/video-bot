@@ -234,7 +234,8 @@ def main():
         )
     )
 
-    print("🤖 البوت يعمل...")
+
+    Thread(target=run_web, daemon=True).start()
     app.run_polling(
         drop_pending_updates=True
     )
