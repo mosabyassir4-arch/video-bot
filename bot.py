@@ -4,6 +4,8 @@ import asyncio
 import uuid
 from pathlib import Path
 
+from http.server import BaseHTTPRequestHandler, HTTPServer
+from threading import Thread
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.error import BadRequest
 from telegram.ext import (
@@ -14,6 +16,22 @@ from telegram.ext import (
     ContextTypes,
     filters,
 )
+
+
+class HealthHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"OK")
+
+    def log_message(self, format, *args):
+        return
+
+
+def run_web():
+    port = int(os.getenv("PORT", "10000"))
+    server = HTTPServer(("0.0.0.0", port), HealthHandler)
+    server.serve_forever()
 
 TOKEN = os.getenv("BOT_TOKEN")
 
