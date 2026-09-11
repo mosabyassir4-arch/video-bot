@@ -1,6 +1,7 @@
 import os
 import re
 import asyncio
+import time
 import uuid
 from pathlib import Path
 
@@ -102,8 +103,6 @@ async def do_download(query, url, quality):
         "yt-dlp",
         "--no-playlist",
         "--no-warnings",
-    "--concurrent-fragments",
-    "8",
         "--merge-output-format",
         "mp4",
         "-f",
@@ -122,10 +121,36 @@ async def do_download(query, url, quality):
         process = await asyncio.create_subprocess_exec(
             *command,
             stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,
         )
 
-        stdout, stderr = await process.communicate()
+        last_update = 0
+        progress_line = ""
+
+        while True:
+            line = await process.stdout.readline()
+
+            if not line:
+                break
+
+            text = line.decode(errors="ignore").strip()
+
+            if "[download]" in text:
+                progress_line = text
+
+                if time.monotonic() - last_update >= 5:
+                    try:
+                        await query.edit_message_text(
+                            f"⏳ جارٍ التحميل بجودة {quality_text}...\n\n"
+                            f"{progress_line}"
+                        )
+                        last_update = time.monotonic()
+                    except Exception:
+                        pass
+
+        await process.wait()
+        stdout = b""
+        stderr = b""
 
         if process.returncode != 0:
             await query.edit_message_text(
