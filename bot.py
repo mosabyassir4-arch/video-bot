@@ -102,6 +102,8 @@ async def do_download(query, url, quality):
         "yt-dlp",
         "--no-playlist",
         "--no-warnings",
+    "--concurrent-fragments",
+    "8",
         "--merge-output-format",
         "mp4",
         "-f",
