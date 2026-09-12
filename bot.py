@@ -6,6 +6,7 @@ import asyncio
 import threading
 import subprocess
 import yt_dlp
+import static_ffmpeg
 from flask import Flask
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -17,6 +18,10 @@ from telegram.ext import (
     ContextTypes,
 )
 
+# تفعيل ffmpeg في بيئة العمل السحابية تلقائياً
+static_ffmpeg.add_paths()
+
+# 1. تشغيل خادم الويب لإبقاء البوت نشطاً
 web_app = Flask(__name__)
 
 @web_app.route('/')
@@ -31,9 +36,15 @@ threading.Thread(target=run_flask, daemon=True).start()
 
 TOKEN = "8850349497:AAF8kUGQJaNNLhrHVZakm55N8EjYn59YXNM"
 
-def extract_url(text):
+def clean_url(text):
     match = re.search(r'(https?://[^\s]+)', text)
-    return match.group(1) if match else None
+    if not match:
+        return None
+    url = match.group(1)
+    # تنظيف روابط إنستغرام من المعاملات الزائدة
+    if "instagram.com" in url:
+        url = url.split("?")[0]
+    return url
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
@@ -43,7 +54,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def ask_quality(update: Update, context: ContextTypes.DEFAULT_TYPE):
     raw_text = update.message.text
-    url = extract_url(raw_text)
+    url = clean_url(raw_text)
 
     if not url:
         await update.message.reply_text("⚠️ لم أتمكن من العثور على رابط صالح في رسالتك.")
@@ -133,7 +144,6 @@ async def handle_choice(update: Update, context: ContextTypes.DEFAULT_TYPE):
         'progress_hooks': [progress_hook],
         'quiet': True,
         'no_warnings': True,
-        'merge_output_format': 'mp4',
     }
 
     if choice == "q_best":
@@ -164,14 +174,14 @@ async def handle_choice(update: Update, context: ContextTypes.DEFAULT_TYPE):
         size_mb = os.path.getsize(file_to_send) / (1024 * 1024)
 
         if choice != "q_mp3" and size_mb > 49:
-            await status_msg.edit_text("⚙️ حجم الفيديو أكبر من 50MB، جاري ضغطه ليلائم إرسال تيليجرام...")
+            await status_msg.edit_text("⚙️ حجم الفيديو أكبر من 50MB، جاري ضغطه...")
             compressed_file = "compressed.mp4"
             await asyncio.to_thread(compress_video, file_to_send, compressed_file)
             if os.path.exists(compressed_file) and os.path.getsize(compressed_file) > 0:
                 os.remove(file_to_send)
                 file_to_send = compressed_file
 
-        await status_msg.edit_text("📤 جاري الرفع من السيرفر وإرساله إليك...")
+        await status_msg.edit_text("📤 جاري الإرسال إليك...")
 
         with open(file_to_send, 'rb') as f:
             if choice == "q_mp3":
@@ -184,8 +194,9 @@ async def handle_choice(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if os.path.exists(file_to_send):
             os.remove(file_to_send)
 
-    except Exception as e:
-        await status_msg.edit_text("❌ حدث خطأ أثناء المعالجة.")
+    except Exception as err:
+        # إظهار سبب الخطأ بدقة لمعرفته فوراً
+        await status_msg.edit_text(f"❌ حدث خطأ أثناء المعالجة: {str(err)[:100]}")
 
 if __name__ == '__main__':
     app = (
