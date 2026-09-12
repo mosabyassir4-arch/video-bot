@@ -5,6 +5,7 @@ import time
 import asyncio
 import threading
 import subprocess
+import requests
 import yt_dlp
 import static_ffmpeg
 from flask import Flask
@@ -21,7 +22,7 @@ from telegram.ext import (
 # تفعيل ffmpeg تلقائياً
 static_ffmpeg.add_paths()
 
-# خادم ويب لإبقاء البوت نشطاً 24/7
+# خادم ويب لإبقاء Render مستيقظاً 24/7
 web_app = Flask(__name__)
 
 @web_app.route('/')
@@ -44,6 +45,47 @@ def clean_url(text):
     if "instagram.com" in url:
         url = url.split("?")[0]
     return url
+
+def download_youtube_cobalt(url, choice):
+    """تخطي حظر سيرفرات يوتيوب بالكامل عبر cobalt API"""
+    api_url = "https://api.cobalt.tools"
+    headers = {
+        "Accept": "application/json",
+        "Content-Type": "application/json"
+    }
+    
+    video_quality = "720"
+    if choice == "q_1080":
+        video_quality = "1080"
+    elif choice == "q_360":
+        video_quality = "360"
+    elif choice == "q_best":
+        video_quality = "max"
+
+    payload = {
+        "url": url,
+        "videoQuality": video_quality,
+        "downloadMode": "audio" if choice == "q_mp3" else "auto"
+    }
+
+    resp = requests.post(api_url, json=payload, headers=headers, timeout=25)
+    data = resp.json()
+
+    media_url = data.get("url")
+    if not media_url:
+        raise Exception(data.get("text", "تعذر استخراج رابط الفيديو من يوتيوب."))
+
+    ext = "mp3" if choice == "q_mp3" else "mp4"
+    out_file = f"temp_file.{ext}"
+
+    # تنزيل الملف محلياً لإرساله
+    with requests.get(media_url, stream=True, timeout=60) as r:
+        r.raise_for_status()
+        with open(out_file, 'wb') as f:
+            for chunk in r.iter_content(chunk_size=8192):
+                if chunk:
+                    f.write(chunk)
+    return out_file
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
@@ -97,98 +139,57 @@ async def handle_choice(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text("⚠️ انتهت الجلسة، يرجى إعادة إرسال الرابط.")
         return
 
-    status_msg = await query.edit_message_text("⏳ بدء التحميل من السيرفر السحابي...")
+    status_msg = await query.edit_message_text("⏳ بدء التحميل السريع...")
 
+    # مسح الملفات المؤقتة القديمة
     for f in glob.glob("temp_file*") + glob.glob("compressed*"):
         try:
             os.remove(f)
         except Exception:
             pass
 
-    last_update_time = 0
-    loop = asyncio.get_running_loop()
-
-    def progress_hook(d):
-        nonlocal last_update_time
-        if d.get('status') == 'downloading':
-            now = time.time()
-            if now - last_update_time > 3:
-                last_update_time = now
-                total = d.get('total_bytes') or d.get('total_bytes_estimate') or 0
-                downloaded = d.get('downloaded_bytes', 0)
-                eta = d.get('eta')
-                speed = d.get('speed') or 0
-
-                percent = (downloaded / total * 100) if total > 0 else 0
-                speed_mb = speed / (1024 * 1024)
-                eta_text = f"{int(eta)} ثانية" if eta is not None else "جاري الحساب..."
-
-                text = (
-                    f"⏳ **جاري التحميل...**\n"
-                    f"📊 التقدم: {percent:.1f}%\n"
-                    f"⏱ الوقت المتبقي: {eta_text}\n"
-                    f"⚡ السرعة: {speed_mb:.2f} MB/s"
-                )
-                asyncio.run_coroutine_threadsafe(
-                    context.bot.edit_message_text(
-                        chat_id=query.message.chat_id,
-                        message_id=status_msg.message_id,
-                        text=text,
-                        parse_mode="Markdown"
-                    ),
-                    loop
-                )
-
-    ydl_opts = {
-        'outtmpl': 'temp_file.%(ext)s',
-        'progress_hooks': [progress_hook],
-        'quiet': True,
-        'no_warnings': True,
-        'merge_output_format': 'mp4',
-        'age_limit': 99,
-        'extractor_args': {
-            'youtube': {
-                'player_client': ['tv', 'mweb'],
-                'player_skip': ['web', 'configs']
-            }
-        },
-        'http_headers': {
-            'User-Agent': 'Mozilla/5.0 (SMART-TV; Linux; Tizen 6.0) AppleWebKit/538.1 (KHTML, like Gecko) Version/6.0 TV Safari/538.1',
-            'Accept-Language': 'en-US,en;q=0.9',
-        },
-    }
-
-    # التحقق التلقائي من أي ملف كوكيز إذا توفر
-    if os.path.exists("/etc/secrets/cookies.txt"):
-        ydl_opts['cookiefile'] = "/etc/secrets/cookies.txt"
-    elif os.path.exists("cookies.txt"):
-        ydl_opts['cookiefile'] = "cookies.txt"
-
-    if choice == "q_best":
-        ydl_opts['format'] = 'bestvideo+bestaudio/best'
-    elif choice == "q_1080":
-        ydl_opts['format'] = 'bestvideo[height<=1080]+bestaudio/best[height<=1080]/best'
-    elif choice == "q_720":
-        ydl_opts['format'] = 'bestvideo[height<=720]+bestaudio/best[height<=720]/best'
-    elif choice == "q_360":
-        ydl_opts['format'] = 'bestvideo[height<=360]+bestaudio/best[height<=360]/best'
-    else:
-        ydl_opts['format'] = 'bestaudio/best'
-        ydl_opts['postprocessors'] = [{
-            'key': 'FFmpegExtractAudio',
-            'preferredcodec': 'mp3',
-            'preferredquality': '192',
-        }]
-
     try:
-        await asyncio.to_thread(lambda: yt_dlp.YoutubeDL(ydl_opts).download([url]))
+        # إذا كان الرابط يوتيوب، نتخطى الحظر السحابي عبر المحرك المخصص
+        if "youtu.be" in url or "youtube.com" in url:
+            file_to_send = await asyncio.to_thread(download_youtube_cobalt, url, choice)
+        else:
+            # المواقع الأخرى (إنستغرام، وغيرها) تعمل عبر yt-dlp
+            ydl_opts = {
+                'outtmpl': 'temp_file.%(ext)s',
+                'quiet': True,
+                'no_warnings': True,
+                'merge_output_format': 'mp4',
+                'nocheckcertificate': True,
+            }
+            if choice == "q_best":
+                ydl_opts['format'] = 'bestvideo+bestaudio/best'
+            elif choice == "q_1080":
+                ydl_opts['format'] = 'bestvideo[height<=1080]+bestaudio/best[height<=1080]/best'
+            elif choice == "q_720":
+                ydl_opts['format'] = 'bestvideo[height<=720]+bestaudio/best[height<=720]/best'
+            elif choice == "q_360":
+                ydl_opts['format'] = 'bestvideo[height<=360]+bestaudio/best[height<=360]/best'
+            else:
+                ydl_opts['format'] = 'bestaudio/best'
+                ydl_opts['postprocessors'] = [{
+                    'key': 'FFmpegExtractAudio',
+                    'preferredcodec': 'mp3',
+                    'preferredquality': '192',
+                }]
 
-        files = glob.glob("temp_file.*")
-        if not files:
-            await status_msg.edit_text("❌ تعذر العثور على الفيديو.")
-            return
+            if os.path.exists("/etc/secrets/cookies.txt"):
+                ydl_opts['cookiefile'] = "/etc/secrets/cookies.txt"
+            elif os.path.exists("cookies.txt"):
+                ydl_opts['cookiefile'] = "cookies.txt"
 
-        file_to_send = files[0]
+            await asyncio.to_thread(lambda: yt_dlp.YoutubeDL(ydl_opts).download([url]))
+
+            files = glob.glob("temp_file.*")
+            if not files:
+                await status_msg.edit_text("❌ تعذر العثور على الفيديو.")
+                return
+            file_to_send = files[0]
+
         size_mb = os.path.getsize(file_to_send) / (1024 * 1024)
 
         if choice != "q_mp3" and size_mb > 49:
