@@ -18,10 +18,10 @@ from telegram.ext import (
     ContextTypes,
 )
 
-# تفعيل ffmpeg في بيئة العمل السحابية تلقائياً
+# تفعيل ffmpeg تلقائياً
 static_ffmpeg.add_paths()
 
-# 1. تشغيل خادم الويب لإبقاء البوت نشطاً
+# 1. خادم ويب لإبقاء Render مستيقظاً 24/7
 web_app = Flask(__name__)
 
 @web_app.route('/')
@@ -34,6 +34,7 @@ def run_flask():
 
 threading.Thread(target=run_flask, daemon=True).start()
 
+# 2. إعدادات التوكن
 TOKEN = "8850349497:AAF8kUGQJaNNLhrHVZakm55N8EjYn59YXNM"
 
 def clean_url(text):
@@ -41,7 +42,6 @@ def clean_url(text):
     if not match:
         return None
     url = match.group(1)
-    # تنظيف روابط إنستغرام من المعاملات الزائدة
     if "instagram.com" in url:
         url = url.split("?")[0]
     return url
@@ -139,11 +139,23 @@ async def handle_choice(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     loop
                 )
 
+    # إعدادات متقدمة لتخطي قيود 429 وحظر السيرفرات السحابية
     ydl_opts = {
         'outtmpl': 'temp_file.%(ext)s',
         'progress_hooks': [progress_hook],
         'quiet': True,
         'no_warnings': True,
+        'merge_output_format': 'mp4',
+        'http_headers': {
+            'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1',
+            'Accept-Language': 'en-US,en;q=0.9',
+            'Sec-Fetch-Mode': 'navigate',
+        },
+        'extractor_args': {
+            'youtube': {
+                'player_client': ['ios', 'android'],
+            },
+        },
     }
 
     if choice == "q_best":
@@ -195,8 +207,7 @@ async def handle_choice(update: Update, context: ContextTypes.DEFAULT_TYPE):
             os.remove(file_to_send)
 
     except Exception as err:
-        # إظهار سبب الخطأ بدقة لمعرفته فوراً
-        await status_msg.edit_text(f"❌ حدث خطأ أثناء المعالجة: {str(err)[:100]}")
+        await status_msg.edit_text(f"❌ حدث خطأ أثناء المعالجة:\n{str(err)[:120]}")
 
 if __name__ == '__main__':
     app = (
