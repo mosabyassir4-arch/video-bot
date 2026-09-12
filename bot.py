@@ -1,274 +1,204 @@
 import os
 import re
-import asyncio
+import glob
 import time
-import uuid
-from pathlib import Path
-
-from http.server import BaseHTTPRequestHandler, HTTPServer
-from threading import Thread
+import asyncio
+import threading
+import subprocess
+import yt_dlp
+from flask import Flask
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.error import BadRequest
 from telegram.ext import (
-    Application,
+    ApplicationBuilder,
     CommandHandler,
     MessageHandler,
     CallbackQueryHandler,
-    ContextTypes,
     filters,
+    ContextTypes,
 )
 
+web_app = Flask(__name__)
 
-class HealthHandler(BaseHTTPRequestHandler):
-    def do_GET(self):
-        self.send_response(200)
-        self.end_headers()
-        self.wfile.write(b"OK")
+@web_app.route('/')
+def home():
+    return "Bot is alive 24/7!"
 
-    def log_message(self, format, *args):
-        return
+def run_flask():
+    port = int(os.environ.get("PORT", 8080))
+    web_app.run(host="0.0.0.0", port=port)
 
+threading.Thread(target=run_flask, daemon=True).start()
 
-def run_web():
-    port = int(os.getenv("PORT", "10000"))
-    server = HTTPServer(("0.0.0.0", port), HealthHandler)
-    server.serve_forever()
+TOKEN = "8850349497:AAF8kUGQJaNNLhrHVZakm55N8EjYn59YXNM"
 
-TOKEN = os.getenv("BOT_TOKEN")
-
-BASE_DIR = Path.home() / "video_bot"
-DOWNLOAD_DIR = BASE_DIR / "downloads"
-DOWNLOAD_DIR.mkdir(parents=True, exist_ok=True)
-
+def extract_url(text):
+    match = re.search(r'(https?://[^\s]+)', text)
+    return match.group(1) if match else None
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "👋 أهلاً بك!\n\n"
-        "أرسل رابط الفيديو وسأعطيك خيارات الجودة:\n\n"
-        "360p / 480p / 720p / 1080p\n\n"
-        "يدعم المواقع التي يدعمها yt-dlp."
+        "👋 أهلاً بك في بوت التحميل السحابي!\n"
+        "أرسل لي أي رابط فيديو لاختيار الدقة والتحميل فوراً 🎬"
     )
 
+async def ask_quality(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    raw_text = update.message.text
+    url = extract_url(raw_text)
 
-async def receive_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = update.message.text.strip()
-    match = re.search(r"https?://\S+", text)
-
-    if not match:
-        await update.message.reply_text("❌ أرسل رابطًا صحيحًا.")
+    if not url:
+        await update.message.reply_text("⚠️ لم أتمكن من العثور على رابط صالح في رسالتك.")
         return
 
-    url = match.group(0)
-
-    context.user_data["url"] = url
+    context.user_data['url'] = url
 
     keyboard = [
         [
-            InlineKeyboardButton("360p", callback_data="q:360"),
-            InlineKeyboardButton("480p", callback_data="q:480"),
+            InlineKeyboardButton("🌟 أعلى جودة متاحة (Best)", callback_data="q_best"),
         ],
         [
-            InlineKeyboardButton("720p", callback_data="q:720"),
-            InlineKeyboardButton("1080p", callback_data="q:1080"),
+            InlineKeyboardButton("🎬 1080p (FHD)", callback_data="q_1080"),
+            InlineKeyboardButton("🎬 720p (HD)", callback_data="q_720"),
         ],
         [
-            InlineKeyboardButton("⭐ أفضل جودة", callback_data="q:best"),
-        ],
-    ]
-
-    await update.message.reply_text(
-        "🎬 اختر الجودة:",
-        reply_markup=InlineKeyboardMarkup(keyboard),
-    )
-
-
-async def do_download(query, url, quality):
-    job_id = uuid.uuid4().hex[:10]
-    job_dir = DOWNLOAD_DIR / job_id
-    job_dir.mkdir(parents=True, exist_ok=True)
-
-    output = str(job_dir / "%(title).80s.%(ext)s")
-
-    if quality == "best":
-        fmt = "bv*+ba/b"
-        quality_text = "أفضل جودة"
-    else:
-        fmt = (
-            f"bv*[height<={quality}]+ba/"
-            f"b[height<={quality}]/b"
-        )
-        quality_text = f"{quality}p"
-
-    command = [
-        "yt-dlp",
-        "--no-playlist",
-        "--concurrent-fragments",
-        "4",
-        "--no-warnings",
-        "--merge-output-format",
-        "mp4",
-        "-f",
-        fmt,
-        "-o",
-        output,
-        url,
-    ]
-
-    try:
-        await query.edit_message_text(
-            f"⏳ جارٍ التحميل بجودة {quality_text}...\n"
-            "انتظر حتى يكتمل التحميل."
-        )
-
-        process = await asyncio.create_subprocess_exec(
-            *command,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.STDOUT,
-        )
-
-        last_update = 0
-        progress_line = ""
-
-        while True:
-            line = await process.stdout.readline()
-
-            if not line:
-                break
-
-            text = line.decode(errors="ignore").strip()
-
-            if "[download]" in text:
-                progress_line = text
-
-                if time.monotonic() - last_update >= 5:
-                    try:
-                        await query.edit_message_text(
-                            f"⏳ جارٍ التحميل بجودة {quality_text}...\n\n"
-                            f"{progress_line}"
-                        )
-                        last_update = time.monotonic()
-                    except Exception:
-                        pass
-
-        await process.wait()
-        stdout = b""
-        stderr = b""
-
-        if process.returncode != 0:
-            await query.edit_message_text(
-                "❌ لم أستطع تنزيل هذا الرابط.\n\n"
-                "قد يكون الرابط خاصًا أو غير مدعوم أو يتطلب تسجيل دخول."
-            )
-            return
-
-        files = [
-            p for p in job_dir.iterdir()
-            if p.is_file()
+            InlineKeyboardButton("📱 360p (سريع)", callback_data="q_360"),
+            InlineKeyboardButton("🎵 صوت فقط (MP3)", callback_data="q_mp3"),
         ]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    await update.message.reply_text("اختر الجودة المطلوبة للتحميل:", reply_markup=reply_markup)
 
-        if not files:
-            await query.edit_message_text(
-                "❌ لم يتم العثور على الفيديو بعد التحميل."
-            )
-            return
+def compress_video(input_path, output_path):
+    cmd = [
+        "ffmpeg", "-y", "-i", input_path,
+        "-c:v", "libx264", "-crf", "32", "-preset", "ultrafast",
+        "-c:a", "aac", "-b:a", "96k",
+        "-fs", "48M", output_path
+    ]
+    subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
-        file_path = max(
-            files,
-            key=lambda p: p.stat().st_mtime
-        )
-
-        await query.edit_message_text(
-            "📤 تم التحميل، جارٍ إرسال الفيديو..."
-        )
-
-        with open(file_path, "rb") as video:
-            await query.message.reply_video(
-                video=video,
-                caption=f"✅ تم التحميل — {quality_text}"
-            )
-
-    except Exception:
-        try:
-            await query.edit_message_text(
-                "❌ حدث خطأ أثناء تنزيل الفيديو."
-            )
-        except Exception:
-            pass
-
-    finally:
-        try:
-            for p in job_dir.iterdir():
-                if p.is_file():
-                    p.unlink()
-            job_dir.rmdir()
-        except Exception:
-            pass
-
-
-async def download_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def handle_choice(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
+    await query.answer()
 
-    # الرد على الزر فورًا حتى لا تنتهي صلاحيته
-    try:
-        await query.answer()
-    except BadRequest:
-        return
-
-    url = context.user_data.get("url")
+    choice = query.data
+    url = context.user_data.get('url')
 
     if not url:
+        await query.edit_message_text("⚠️ انتهت الجلسة، يرجى إعادة إرسال الرابط.")
+        return
+
+    status_msg = await query.edit_message_text("⏳ بدء التحميل من السيرفر السحابي...")
+
+    for f in glob.glob("temp_file*") + glob.glob("compressed*"):
         try:
-            await query.edit_message_text(
-                "❌ أرسل الرابط من جديد."
-            )
+            os.remove(f)
         except Exception:
             pass
-        return
 
-    quality = query.data.split(":")[1]
+    last_update_time = 0
+    loop = asyncio.get_running_loop()
 
-    # تشغيل التحميل في مهمة مستقلة
-    asyncio.create_task(
-        do_download(query, url, quality)
-    )
+    def progress_hook(d):
+        nonlocal last_update_time
+        if d['status'] == 'downloading':
+            now = time.time()
+            if now - last_update_time > 3:
+                last_update_time = now
+                total = d.get('total_bytes') or d.get('total_bytes_estimate') or 0
+                downloaded = d.get('downloaded_bytes', 0)
+                eta = d.get('eta', 0)
+                speed = d.get('speed', 0)
 
+                percent = (downloaded / total * 100) if total > 0 else 0
+                speed_mb = (speed / (1024 * 1024)) if speed else 0
 
-def main():
-    if not TOKEN:
-        print("❌ BOT_TOKEN غير موجود.")
-        print("استخدم:")
-        print("export BOT_TOKEN='توكن_البوت'")
-        return
+                text = (
+                    f"⏳ **جاري التحميل...**\n"
+                    f"📊 التقدم: {percent:.1f}%\n"
+                    f"⏱ الوقت المتبقي: {int(eta)} ثانية\n"
+                    f"⚡ السرعة: {speed_mb:.2f} MB/s"
+                )
+                asyncio.run_coroutine_threadsafe(
+                    context.bot.edit_message_text(
+                        chat_id=query.message.chat_id,
+                        message_id=status_msg.message_id,
+                        text=text,
+                        parse_mode="Markdown"
+                    ),
+                    loop
+                )
 
+    ydl_opts = {
+        'outtmpl': 'temp_file.%(ext)s',
+        'progress_hooks': [progress_hook],
+        'quiet': True,
+        'no_warnings': True,
+        'merge_output_format': 'mp4',
+    }
+
+    if choice == "q_best":
+        ydl_opts['format'] = 'bestvideo+bestaudio/best'
+    elif choice == "q_1080":
+        ydl_opts['format'] = 'bestvideo[height<=1080]+bestaudio/best[height<=1080]/best'
+    elif choice == "q_720":
+        ydl_opts['format'] = 'bestvideo[height<=720]+bestaudio/best[height<=720]/best'
+    elif choice == "q_360":
+        ydl_opts['format'] = 'bestvideo[height<=360]+bestaudio/best[height<=360]/best'
+    else:
+        ydl_opts['format'] = 'bestaudio/best'
+        ydl_opts['postprocessors'] = [{
+            'key': 'FFmpegExtractAudio',
+            'preferredcodec': 'mp3',
+            'preferredquality': '192',
+        }]
+
+    try:
+        await asyncio.to_thread(lambda: yt_dlp.YoutubeDL(ydl_opts).download([url]))
+
+        files = glob.glob("temp_file.*")
+        if not files:
+            await status_msg.edit_text("❌ تعذر العثور على الفيديو.")
+            return
+
+        file_to_send = files[0]
+        size_mb = os.path.getsize(file_to_send) / (1024 * 1024)
+
+        if choice != "q_mp3" and size_mb > 49:
+            await status_msg.edit_text("⚙️ حجم الفيديو أكبر من 50MB، جاري ضغطه ليلائم إرسال تيليجرام...")
+            compressed_file = "compressed.mp4"
+            await asyncio.to_thread(compress_video, file_to_send, compressed_file)
+            if os.path.exists(compressed_file) and os.path.getsize(compressed_file) > 0:
+                os.remove(file_to_send)
+                file_to_send = compressed_file
+
+        await status_msg.edit_text("📤 جاري الرفع من السيرفر وإرساله إليك...")
+
+        with open(file_to_send, 'rb') as f:
+            if choice == "q_mp3":
+                await context.bot.send_audio(chat_id=query.message.chat_id, audio=f, read_timeout=300, write_timeout=300)
+            else:
+                await context.bot.send_video(chat_id=query.message.chat_id, video=f, read_timeout=300, write_timeout=300)
+
+        await status_msg.delete()
+
+        if os.path.exists(file_to_send):
+            os.remove(file_to_send)
+
+    except Exception as e:
+        await status_msg.edit_text("❌ حدث خطأ أثناء المعالجة.")
+
+if __name__ == '__main__':
     app = (
-        Application.builder()
+        ApplicationBuilder()
         .token(TOKEN)
-        .concurrent_updates(True)
+        .read_timeout(300)
+        .write_timeout(300)
+        .connect_timeout(60)
         .build()
     )
 
-    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler('start', start))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, ask_quality))
+    app.add_handler(CallbackQueryHandler(handle_choice))
 
-    app.add_handler(
-        CallbackQueryHandler(
-            download_video,
-            pattern=r"^q:"
-        )
-    )
-
-    app.add_handler(
-        MessageHandler(
-            filters.TEXT & ~filters.COMMAND,
-            receive_url
-        )
-    )
-
-
-    Thread(target=run_web, daemon=True).start()
-    app.run_polling(
-        drop_pending_updates=True
-    )
-
-
-if __name__ == "__main__":
-    main()
+    app.run_polling()
