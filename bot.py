@@ -116,22 +116,23 @@ async def handle_choice(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     def progress_hook(d):
         nonlocal last_update_time
-        if d['status'] == 'downloading':
+        if d.get('status') == 'downloading':
             now = time.time()
             if now - last_update_time > 3:
                 last_update_time = now
                 total = d.get('total_bytes') or d.get('total_bytes_estimate') or 0
                 downloaded = d.get('downloaded_bytes', 0)
-                eta = d.get('eta', 0)
-                speed = d.get('speed', 0)
+                eta = d.get('eta')
+                speed = d.get('speed') or 0
 
                 percent = (downloaded / total * 100) if total > 0 else 0
-                speed_mb = (speed / (1024 * 1024)) if speed else 0
+                speed_mb = speed / (1024 * 1024)
+                eta_text = f"{int(eta)} ثانية" if eta is not None else "جاري الحساب..."
 
                 text = (
                     f"⏳ **جاري التحميل...**\n"
                     f"📊 التقدم: {percent:.1f}%\n"
-                    f"⏱ الوقت المتبقي: {int(eta)} ثانية\n"
+                    f"⏱ الوقت المتبقي: {eta_text}\n"
                     f"⚡ السرعة: {speed_mb:.2f} MB/s"
                 )
                 asyncio.run_coroutine_threadsafe(
@@ -150,13 +151,18 @@ async def handle_choice(update: Update, context: ContextTypes.DEFAULT_TYPE):
         'quiet': True,
         'no_warnings': True,
         'merge_output_format': 'mp4',
+        # محاكاة تطبيق أندرويد لتخطي حظر Sign in to confirm you're not a bot
+        'extractor_args': {
+            'youtube': {
+                'player_client': ['android', 'web']
+            }
+        },
         'http_headers': {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+            'User-Agent': 'Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Mobile Safari/537.36',
             'Accept-Language': 'en-US,en;q=0.9',
         },
     }
 
-    # استخدام الكوكيز إن وُجدت لتخطي قيود يوتيوب وإنستغرام
     if os.path.exists("cookies.txt"):
         ydl_opts['cookiefile'] = 'cookies.txt'
 
