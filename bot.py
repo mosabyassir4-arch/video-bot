@@ -5,7 +5,6 @@ import time
 import asyncio
 import threading
 import subprocess
-import requests
 import yt_dlp
 import static_ffmpeg
 from flask import Flask
@@ -19,8 +18,10 @@ from telegram.ext import (
     ContextTypes,
 )
 
+# تفعيل ffmpeg
 static_ffmpeg.add_paths()
 
+# خادم ويب لإبقاء Render مستيقظاً 24/7
 web_app = Flask(__name__)
 
 @web_app.route('/')
@@ -44,52 +45,10 @@ def clean_url(text):
         url = url.split("?")[0]
     return url
 
-def download_via_universal_api(url, choice):
-    """محرك فك الحظر المباشر لمنصات يوتيوب وإنستغرام"""
-    is_audio = (choice == "q_mp3")
-    q = "720"
-    if choice == "q_1080":
-        q = "1080"
-    elif choice == "q_360":
-        q = "360"
-
-    # استخدام وسيط تنزيل خارجي فوري
-    endpoints = [
-        "https://api.vkrdownloader.com/server?vkr=",
-        "https://downloader.freemedia.workers.dev/?url="
-    ]
-    
-    download_url = None
-    for ep in endpoints:
-        try:
-            r = requests.get(f"{ep}{url}", timeout=15)
-            res = r.json()
-            if res.get("data") and res["data"].get("downloadUrl"):
-                download_url = res["data"]["downloadUrl"]
-                break
-            elif res.get("url"):
-                download_url = res["url"]
-                break
-        except Exception:
-            continue
-
-    if not download_url:
-        return None
-
-    ext = "mp3" if is_audio else "mp4"
-    out_file = f"temp_file.{ext}"
-    with requests.get(download_url, stream=True, timeout=60) as dl:
-        dl.raise_for_status()
-        with open(out_file, "wb") as f:
-            for chunk in dl.iter_content(chunk_size=1024 * 1024):
-                if chunk:
-                    f.write(chunk)
-    return out_file
-
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "👋 أهلاً بك في بوت التحميل السريع!\n"
-        "أرسل لي الرابط وسأقوم بتحميله فوراً 🎬"
+        "👋 أهلاً بك في بوت التحميل السحابي!\n"
+        "أرسل لي أي رابط فيديو (يوتيوب، إنستغرام، وغيرها) لاختيار الدقة والتحميل فوراً 🎬"
     )
 
 async def ask_quality(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -97,7 +56,7 @@ async def ask_quality(update: Update, context: ContextTypes.DEFAULT_TYPE):
     url = clean_url(raw_text)
 
     if not url:
-        await update.message.reply_text("⚠️ يرجى إرسال رابط صالح.")
+        await update.message.reply_text("⚠️ لم أتمكن من العثور على رابط صالح في رسالتك.")
         return
 
     context.user_data['url'] = url
@@ -109,7 +68,7 @@ async def ask_quality(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton("🎵 صوت فقط (MP3)", callback_data="q_mp3")],
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
-    await update.message.reply_text("اختر الجودة المطلوبة:", reply_markup=reply_markup)
+    await update.message.reply_text("اختر الجودة المطلوبة للتحميل:", reply_markup=reply_markup)
 
 def compress_video(input_path, output_path):
     cmd = [
@@ -128,10 +87,10 @@ async def handle_choice(update: Update, context: ContextTypes.DEFAULT_TYPE):
     url = context.user_data.get('url')
 
     if not url:
-        await query.edit_message_text("⚠️ انتهت الجلسة، أرسل الرابط ثانية.")
+        await query.edit_message_text("⚠️ انتهت الجلسة، يرجى إعادة إرسال الرابط.")
         return
 
-    status_msg = await query.edit_message_text("⏳ جاري سحب وتجهيز الفيديو...")
+    status_msg = await query.edit_message_text("⏳ بدء التحميل باستخدام الكوكيز الموثقة...")
 
     for f in glob.glob("temp_file*") + glob.glob("compressed*"):
         try:
@@ -139,66 +98,85 @@ async def handle_choice(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception:
             pass
 
-    file_to_send = None
+    last_update_time = 0
+    loop = asyncio.get_running_loop()
 
-    # المحاولة الأولى: عبر المحرك المباشر لفك حظر السيرفرات
+    def progress_hook(d):
+        nonlocal last_update_time
+        if d.get('status') == 'downloading':
+            now = time.time()
+            if now - last_update_time > 3:
+                last_update_time = now
+                total = d.get('total_bytes') or d.get('total_bytes_estimate') or 0
+                downloaded = d.get('downloaded_bytes', 0)
+                eta = d.get('eta')
+                speed = d.get('speed') or 0
+
+                percent = (downloaded / total * 100) if total > 0 else 0
+                speed_mb = speed / (1024 * 1024)
+                eta_text = f"{int(eta)} ثانية" if eta is not None else "جاري الحساب..."
+
+                text = (
+                    f"⏳ **جاري التحميل...**\n"
+                    f"📊 التقدم: {percent:.1f}%\n"
+                    f"⏱ الوقت المتبقي: {eta_text}\n"
+                    f"⚡ السرعة: {speed_mb:.2f} MB/s"
+                )
+                asyncio.run_coroutine_threadsafe(
+                    context.bot.edit_message_text(
+                        chat_id=query.message.chat_id,
+                        message_id=status_msg.message_id,
+                        text=text,
+                        parse_mode="Markdown"
+                    ),
+                    loop
+                )
+
+    ydl_opts = {
+        'outtmpl': 'temp_file.%(ext)s',
+        'progress_hooks': [progress_hook],
+        'quiet': True,
+        'no_warnings': True,
+        'merge_output_format': 'mp4',
+        'nocheckcertificate': True,
+        'cookiefile': 'cookies.txt',  # استخدام ملف الكوكيز المرفوع
+    }
+
+    if choice == "q_1080":
+        ydl_opts['format'] = 'bestvideo[height<=1080]+bestaudio/best'
+    elif choice == "q_720":
+        ydl_opts['format'] = 'bestvideo[height<=720]+bestaudio/best'
+    elif choice == "q_360":
+        ydl_opts['format'] = 'bestvideo[height<=360]+bestaudio/best'
+    else:
+        ydl_opts['format'] = 'bestaudio/best'
+        ydl_opts['postprocessors'] = [{
+            'key': 'FFmpegExtractAudio',
+            'preferredcodec': 'mp3',
+            'preferredquality': '192',
+        }]
+
     try:
-        file_to_send = await asyncio.to_thread(download_via_universal_api, url, choice)
-    except Exception:
-        file_to_send = None
+        await asyncio.to_thread(lambda: yt_dlp.YoutubeDL(ydl_opts).download([url]))
 
-    # المحاولة الثانية: عبر yt-dlp في حال فشل المحرك
-    if not file_to_send:
-        ydl_opts = {
-            'outtmpl': 'temp_file.%(ext)s',
-            'quiet': True,
-            'no_warnings': True,
-            'merge_output_format': 'mp4',
-            'nocheckcertificate': True,
-            'http_headers': {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36',
-            }
-        }
-        if choice == "q_1080":
-            ydl_opts['format'] = 'bestvideo[height<=1080]+bestaudio/best'
-        elif choice == "q_720":
-            ydl_opts['format'] = 'bestvideo[height<=720]+bestaudio/best'
-        elif choice == "q_360":
-            ydl_opts['format'] = 'bestvideo[height<=360]+bestaudio/best'
-        else:
-            ydl_opts['format'] = 'bestaudio/best'
-            ydl_opts['postprocessors'] = [{
-                'key': 'FFmpegExtractAudio',
-                'preferredcodec': 'mp3',
-                'preferredquality': '192',
-            }]
-
-        try:
-            await asyncio.to_thread(lambda: yt_dlp.YoutubeDL(ydl_opts).download([url]))
-            files = glob.glob("temp_file.*")
-            if files:
-                file_to_send = files[0]
-        except Exception as err:
-            await status_msg.edit_text(f"❌ تعذر التحميل:\n{str(err)[:120]}")
+        files = glob.glob("temp_file.*")
+        if not files:
+            await status_msg.edit_text("❌ تعذر العثور على الفيديو.")
             return
 
-    if not file_to_send or not os.path.exists(file_to_send):
-        await status_msg.edit_text("❌ تعذر العثور على الفيديو أو تم تقييد المحتوى.")
-        return
+        file_to_send = files[0]
+        size_mb = os.path.getsize(file_to_send) / (1024 * 1024)
 
-    size_mb = os.path.getsize(file_to_send) / (1024 * 1024)
+        if choice != "q_mp3" and size_mb > 49:
+            await status_msg.edit_text("⚙️ حجم الفيديو أكبر من 50MB، جاري ضغطه...")
+            compressed_file = "compressed.mp4"
+            await asyncio.to_thread(compress_video, file_to_send, compressed_file)
+            if os.path.exists(compressed_file) and os.path.getsize(compressed_file) > 0:
+                os.remove(file_to_send)
+                file_to_send = compressed_file
 
-    if choice != "q_mp3" and size_mb > 49:
-        await status_msg.edit_text("⚙️ جاري ضغط الفيديو ليتطابق مع قيود تيليجرام...")
-        compressed_file = "compressed.mp4"
-        await asyncio.to_thread(compress_video, file_to_send, compressed_file)
-        if os.path.exists(compressed_file) and os.path.getsize(compressed_file) > 0:
-            os.remove(file_to_send)
-            file_to_send = compressed_file
+        await status_msg.edit_text("📤 جاري الإرسال إليك...")
 
-    await status_msg.edit_text("📤 جاري الرفع إلى تيليجرام...")
-
-    try:
         with open(file_to_send, 'rb') as f:
             if choice == "q_mp3":
                 await context.bot.send_audio(chat_id=query.message.chat_id, audio=f, read_timeout=300, write_timeout=300)
@@ -206,11 +184,12 @@ async def handle_choice(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await context.bot.send_video(chat_id=query.message.chat_id, video=f, read_timeout=300, write_timeout=300)
 
         await status_msg.delete()
-    except Exception as e:
-        await status_msg.edit_text(f"❌ فشل إرسال الملف:\n{str(e)[:100]}")
-    finally:
+
         if os.path.exists(file_to_send):
             os.remove(file_to_send)
+
+    except Exception as err:
+        await status_msg.edit_text(f"❌ حدث خطأ أثناء المعالجة:\n{str(err)[:120]}")
 
 if __name__ == '__main__':
     app = (
