@@ -21,11 +21,16 @@ from telegram.ext import (
 # تفعيل ffmpeg تلقائياً
 static_ffmpeg.add_paths()
 
-# كتابة ملف الكوكيز من متغيرات Render إذا وُجدت
-cookies_env = os.environ.get("COOKIES_DATA")
-if cookies_env:
+# التحقق من مسار الكوكيز (سواء كملف سري في Render أو كمتغير بيئي)
+COOKIE_PATH = None
+if os.path.exists("/etc/secrets/cookies.txt"):
+    COOKIE_PATH = "/etc/secrets/cookies.txt"
+elif os.path.exists("cookies.txt"):
+    COOKIE_PATH = "cookies.txt"
+elif os.environ.get("COOKIES_DATA"):
+    COOKIE_PATH = "cookies.txt"
     with open("cookies.txt", "w", encoding="utf-8") as f:
-        f.write(cookies_env)
+        f.write(os.environ.get("COOKIES_DATA"))
 
 # خادم ويب لإبقاء البوت نشطاً 24/7
 web_app = Flask(__name__)
@@ -151,20 +156,22 @@ async def handle_choice(update: Update, context: ContextTypes.DEFAULT_TYPE):
         'quiet': True,
         'no_warnings': True,
         'merge_output_format': 'mp4',
-        # محاكاة تطبيق أندرويد لتخطي حظر Sign in to confirm you're not a bot
+        # تخطي قيود السن والمطالبة بتسجيل الدخول
+        'age_limit': 99,
         'extractor_args': {
             'youtube': {
-                'player_client': ['android', 'web']
+                'player_client': ['ios', 'android', 'mweb'],
+                'player_skip': ['web']
             }
         },
         'http_headers': {
-            'User-Agent': 'Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Mobile Safari/537.36',
+            'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1',
             'Accept-Language': 'en-US,en;q=0.9',
         },
     }
 
-    if os.path.exists("cookies.txt"):
-        ydl_opts['cookiefile'] = 'cookies.txt'
+    if COOKIE_PATH:
+        ydl_opts['cookiefile'] = COOKIE_PATH
 
     if choice == "q_best":
         ydl_opts['format'] = 'bestvideo+bestaudio/best'
